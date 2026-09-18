@@ -10,7 +10,8 @@ export default function Home() {
   useEffect(() => {
     fetch("/api/auth")
       .then((res) => res.json())
-      .then((data) => setAuthenticated(Boolean(data.authenticated)));
+      .then((data) => setAuthenticated(Boolean(data.authenticated)))
+      .catch(() => setAuthenticated(false));
   }, []);
 
   if (authenticated === null) return null;

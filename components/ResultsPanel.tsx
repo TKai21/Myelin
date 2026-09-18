@@ -19,45 +19,48 @@ export function ResultsPanel() {
     setJobs(null);
     setError(null);
 
-    const res = await fetch("/api/agent", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ resume, ...criteria }),
-    });
+    try {
+      const res = await fetch("/api/agent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resume, ...criteria }),
+      });
 
-    if (!res.ok || !res.body) {
-      setError("Search request failed");
-      setRunning(false);
-      return;
-    }
+      if (!res.ok || !res.body) {
+        setError("Search request failed");
+        return;
+      }
 
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
 
-      const chunks = buffer.split("\n\n");
-      buffer = chunks.pop() ?? "";
-      for (const chunk of chunks) {
-        if (!chunk.startsWith("data: ")) continue;
-        const event: AgentEvent = JSON.parse(chunk.slice("data: ".length));
-        if (event.type === "progress") {
-          setProgress((prev) => [...prev, event.message]);
-        } else if (event.type === "result") {
-          setJobs(
-            [...event.data.jobs].sort((a, b) => b.score - a.score)
-          );
-        } else if (event.type === "error") {
-          setError(event.message);
+        const chunks = buffer.split("\n\n");
+        buffer = chunks.pop() ?? "";
+        for (const chunk of chunks) {
+          if (!chunk.startsWith("data: ")) continue;
+          const event: AgentEvent = JSON.parse(chunk.slice("data: ".length));
+          if (event.type === "progress") {
+            setProgress((prev) => [...prev, event.message]);
+          } else if (event.type === "result") {
+            setJobs(
+              [...event.data.jobs].sort((a, b) => b.score - a.score)
+            );
+          } else if (event.type === "error") {
+            setError(event.message);
+          }
         }
       }
+    } catch {
+      setError("Search request failed");
+    } finally {
+      setRunning(false);
     }
-
-    setRunning(false);
   }
 
   return (
