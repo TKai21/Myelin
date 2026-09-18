@@ -47,4 +47,16 @@ describe("parseRankedResults", () => {
       parseRankedResults({ jobs: [{ ...validJob, url: "not-a-url" }] })
     ).toThrow();
   });
+
+  it("accepts jobs stringified as a JSON string (a known tool-call quirk)", () => {
+    const result = parseRankedResults({ jobs: JSON.stringify([validJob]) });
+    expect(result.jobs).toHaveLength(1);
+    expect(result.jobs[0].score).toBe(87);
+  });
+
+  it("still rejects a jobs field that is a non-JSON string", () => {
+    expect(() =>
+      parseRankedResults({ jobs: "not valid json at all" })
+    ).toThrow();
+  });
 });

@@ -67,7 +67,7 @@ export async function* runAgentLoop(
     try {
       response = await client.messages.create({
         model: MODEL,
-        max_tokens: 4096,
+        max_tokens: 8192,
         system: [
           {
             type: "text",
@@ -90,6 +90,15 @@ export async function* runAgentLoop(
     }
 
     messages.push({ role: "assistant", content: response.content });
+
+    if (response.stop_reason === "max_tokens") {
+      yield {
+        type: "error",
+        message:
+          "Agent response was cut off before completing - try a shorter resume or narrower search.",
+      };
+      return;
+    }
 
     const toolUses = response.content.filter(
       (block): block is Anthropic.ToolUseBlock => block.type === "tool_use"

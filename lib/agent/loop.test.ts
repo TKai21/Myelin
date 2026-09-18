@@ -140,6 +140,38 @@ describe("runAgentLoop", () => {
     expect(events).toEqual([{ type: "error", message: "api down" }]);
   });
 
+  it("yields a clear error when the response is cut off by max_tokens", async () => {
+    const client = fakeClient([
+      {
+        stop_reason: "max_tokens",
+        content: [
+          {
+            type: "tool_use",
+            id: "call_1",
+            name: "submit_rankings",
+            input: {},
+          },
+        ],
+      } as unknown as Anthropic.Message,
+    ]);
+
+    const events = await collect(
+      runAgentLoop(client, "resume text", {
+        keywords: [],
+        location: "",
+        remoteOnly: false,
+      })
+    );
+
+    expect(events).toEqual([
+      {
+        type: "error",
+        message:
+          "Agent response was cut off before completing - try a shorter resume or narrower search.",
+      },
+    ]);
+  });
+
   it("forces submit_rankings on the final round via tool_choice", async () => {
     // Never submits on its own, so the loop must run all MAX_TOOL_ROUNDS
     // rounds and we can inspect what the final, forced call requested.
