@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { Header } from "@/components/Header";
 import { PasswordGate } from "@/components/PasswordGate";
 import { ResultsPanel } from "@/components/ResultsPanel";
 
@@ -14,9 +15,22 @@ export default function Home() {
       .catch(() => setAuthenticated(false));
   }, []);
 
-  if (authenticated === null) return null;
+  if (authenticated === null) {
+    return (
+      <div className="flex min-h-screen items-center justify-center">
+        <div className="h-6 w-6 animate-spin rounded-full border-2 border-slate-200 border-t-brand" />
+      </div>
+    );
+  }
+
   if (!authenticated) {
     return <PasswordGate onUnlock={() => setAuthenticated(true)} />;
   }
-  return <ResultsPanel />;
+
+  return (
+    <div className="min-h-screen">
+      <Header />
+      <ResultsPanel />
+    </div>
+  );
 }
