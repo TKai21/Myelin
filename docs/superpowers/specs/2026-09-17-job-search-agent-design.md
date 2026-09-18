@@ -35,12 +35,19 @@ Vercel. No separate backend service, no database. All secrets
 environment variables, read exclusively inside API route handlers and
 never exposed to client code.
 
-Model: Claude Sonnet, used as the sole LLM in the system. It drives
-the entire tool-use loop - deciding which job sources and queries to
-call, and later scoring/ranking results against the resume. Job data
-normalization (turning each API's JSON response into a common shape)
-is deterministic TypeScript, not an LLM step, since the three source
-schemas are well-known and require no fuzzy extraction.
+Model: Claude Sonnet, used as the sole LLM in the system - no
+Sonnet/Haiku split. It drives the entire tool-use loop: deciding which
+job sources and queries to call, and later scoring/ranking results
+against the resume. Both steps require real semantic judgment, so
+neither is a good candidate for downgrading to a cheaper model. Job
+data normalization (turning each API's JSON response into a common
+shape) is deterministic TypeScript, not an LLM step at all - the
+three source schemas are well-known and require no fuzzy extraction,
+so there is no intermediate step that a smaller model would even be
+doing. Cost control for this project comes from the rate limiter
+(below) capping total request volume, not from model selection -
+model choice is a secondary lever once the request-volume ceiling is
+fixed.
 
 ## Components
 
@@ -48,12 +55,16 @@ schemas are well-known and require no fuzzy extraction.
   resume textarea, search criteria form (job title/keywords, location,
   remote-only toggle), and a results panel that renders streamed
   progress and the final ranked list.
-- `app/api/auth/route.ts` - accepts a submitted password, compares
-  against `SITE_PASSWORD`, and on match sets an httpOnly, signed
+- `app/api/auth/route.ts` - compares the submitted password against
+  `SITE_PASSWORD` using `crypto.timingSafeEqual` (not `===`, to avoid
+  a timing side-channel), and on match sets an httpOnly, signed
   session cookie via a standard cookie-session library (e.g.
-  `iron-session`), keyed off a `SESSION_SECRET` env var. No password
-  storage beyond the env var, no session store beyond the cookie
-  itself.
+  `iron-session`), keyed off a `SESSION_SECRET` env var, with
+  `sameSite: "strict"` and `secure: true`. Since the cookie is only
+  ever sent by this app's own same-origin form submission, `strict`
+  plus `secure` closes the CSRF gap on `/api/agent` without needing a
+  separate CSRF token. No password storage beyond the env var, no
+  session store beyond the cookie itself.
 - `app/api/agent/route.ts` - the core endpoint. Requires the session
   cookie; applies per-IP rate limiting; runs the Claude tool-use loop;
   streams progress events and the final structured result back to the
@@ -66,9 +77,22 @@ schemas are well-known and require no fuzzy extraction.
     `{title, company, location, url, description}[]`, swallowing
     per-source failures into a "source unavailable" result rather than
     throwing.
-- `lib/rateLimit.ts` - per-IP request counter (in-memory is acceptable
-  for a single-instance demo deployment; document Vercel KV as the
-  upgrade path if this ever needs to survive across instances).
+- `lib/rateLimit.ts` - rate limiting behind a `RateLimiter` interface
+  (strategy pattern), so `app/api/agent/route.ts` depends only on the
+  interface and never knows which implementation is active:
+  - `UpstashLimiter` - the production implementation, backed by
+    Upstash Redis (`@upstash/ratelimit`). Two limiters run per
+    request: a per-IP sliding window (5 requests / 1 minute) and a
+    global sliding window (100 requests / 1 hour) that caps total
+    spend regardless of how traffic is distributed across IPs.
+  - `InMemoryLimiter` - a local-only fallback (selected when
+    `NODE_ENV !== "production"`) so development doesn't require a
+    Redis connection. This implementation is explicitly not used in
+    production: Vercel serverless functions give no single-instance
+    guarantee (cold starts and concurrent invocations can spin up
+    multiple instances), so an in-memory counter's state is not
+    shared across the instances actually serving traffic, making it
+    an ineffective control in that environment.
 
 ## Data flow
 
@@ -79,8 +103,10 @@ schemas are well-known and require no fuzzy extraction.
    401/429 on failure.
 5. Claude (Sonnet), given the criteria and tool definitions, decides
    which source(s)/queries to call.
-6. Our code executes the real HTTP calls and normalizes results in
-   plain TypeScript (no LLM involved in this step).
+6. Our code executes the real HTTP calls, normalizes results in plain
+   TypeScript (no LLM involved in this step), and applies a relevance
+   heuristic (see Cost & token controls) to pick the top ~10 per
+   source before anything is passed to Claude.
 7. Results are returned to Claude, which de-duplicates listings,
    scores each against the resume, and produces structured output:
    `{score, reasoning}` per job.
@@ -91,11 +117,55 @@ schemas are well-known and require no fuzzy extraction.
 ## Cost & token controls
 
 - Hard `max_tokens` cap on every Claude API call.
-- Raw results truncated (e.g. top ~10 per source) before being passed
+- Raw results truncated to the top ~10 per source before being passed
   to Claude, bounding input tokens regardless of how many listings a
-  source API returns.
+  source API returns. Truncation order is decided by a relevance
+  heuristic, not API return order:
+
+  ```typescript
+  function score(job: Job, keywords: string[]): number {
+    const titleTokens = tokenize(job.title);
+    const descTokens = tokenize(job.description);
+    let titleScore = 0, descScore = 0;
+    for (const kw of keywords.flatMap(tokenize)) {
+      titleScore += titleTokens.filter((t) => t === kw).length;
+      descScore += descTokens.filter((t) => t === kw).length;
+    }
+    // Title hits weighted higher than description hits; log1p
+    // dampens the length bias of long descriptions accumulating
+    // keyword hits just by being verbose.
+    return titleScore * 3 + Math.log1p(descScore);
+  }
+  ```
+
+  Keywords and job text are tokenized (lowercased, split on
+  non-alphanumeric boundaries) and matched token-by-token, not as a
+  substring of the full phrase - so a search for "backend engineer"
+  matches a job titled "Senior Backend Engineer" despite the inserted
+  word and different order.
+
+  This heuristic is a pre-filter only, not the final ranking -
+  Claude's ranking/reasoning step is where real semantic judgment
+  happens, so the heuristic only needs to avoid discarding obviously
+  relevant listings, not match Claude's judgment quality. TF-IDF was
+  considered and rejected: IDF requires a corpus large enough for
+  term rarity statistics to be meaningful, and each search only
+  returns 10-30 listings per source, too small a sample. Embedding
+  similarity was also considered and rejected for the same reason -
+  added cost and complexity for a step that only needs to be "good
+  enough," given Claude re-ranks with full semantic understanding
+  afterward.
 - Tool-use loop capped at a fixed maximum number of turns (e.g. 6) to
-  prevent runaway back-and-forth.
+  prevent runaway back-and-forth. If `MAX_TOOL_ROUNDS` is reached
+  before Claude has produced a final ranking, one additional forced
+  call is made instructing Claude to summarize/rank whatever job data
+  it has gathered so far - so the route always returns a valid ranked
+  result rather than a partial or empty state.
+- The system prompt and tool definitions are static across all turns
+  within a run, so they're marked with Anthropic prompt caching
+  (`cache_control`) to avoid re-billing that fixed context on every
+  turn of the loop - a larger cost lever than model selection for a
+  multi-turn agent.
 - A hard spending limit (e.g. $5/month) set directly on the Anthropic
   Console, as an account-level backstop independent of app code.
 
@@ -139,6 +209,6 @@ schemas are well-known and require no fuzzy extraction.
   Vercel's serverless request-duration ceiling.
 - Environment variables configured in Vercel project settings:
   `ANTHROPIC_API_KEY`, `ADZUNA_APP_ID`, `ADZUNA_APP_KEY`,
-  `SITE_PASSWORD`, plus a session-signing secret. `.env.example`
-  documents all required variables without real values; `.env.local`
-  is git-ignored.
+  `SITE_PASSWORD`, `SESSION_SECRET`, `UPSTASH_REDIS_REST_URL`,
+  `UPSTASH_REDIS_REST_TOKEN`. `.env.example` documents all required
+  variables without real values; `.env.local` is git-ignored.
