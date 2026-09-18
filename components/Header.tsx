@@ -1,6 +1,6 @@
 export function Header() {
   return (
-    <header className="border-b border-slate-200 bg-white/80 backdrop-blur">
+    <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/80 backdrop-blur">
       <div className="mx-auto flex max-w-5xl items-center gap-3 px-6 py-4">
         <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand text-sm font-semibold text-brand-foreground">
           J
